@@ -1,3 +1,4 @@
+import os
 from collections import namedtuple
 import torch
 import torch.nn as nn
@@ -6,6 +7,7 @@ import torch.optim as optim
 from torch.optim.lr_scheduler import StepLR
 import torch.nn.functional as F
 from torch.utils.data import TensorDataset, Dataset
+import matplotlib.pyplot as plt
 
 class NumberEncoder():
     def __init__(self, digits):
@@ -38,8 +40,7 @@ class ProcessorUnit(nn.Module):
         self.wvd = nn.Linear(config.hidden_size, internal_size)
         self.wvu = nn.Linear(internal_size, config.hidden_size)
 
-        n_layer = 8
-        torch.nn.init.normal_(self.wvu.weight, mean=0.0, std=0.2 * (2 * n_layer) ** -0.5)
+        torch.nn.init.normal_(self.wvu.weight, mean=0.0, std=0.05)
         torch.nn.init.zeros_(self.wvu.bias)
         for layer in [self.wvd, self.wp, self.wq]:
             torch.nn.init.normal_(layer.weight, mean=0.0, std=0.2)
@@ -146,6 +147,38 @@ def train(model, device, train_loader, optimizer, epoch, test_loader, log_interv
         if batch_idx % test_interval == 0:
             test(model, device, test_loader)
 
+def plot(model, device, size, file):
+    if not os.path.exists(os.path.dirname(file)): os.mkdir(os.path.dirname(file))
+    model.eval()
+    test_loss, correct = 0, 0
+    encoder = NumberEncoder(model.config.digits)
+    x = torch.linspace(0, size, steps=size, dtype=torch.long)
+    x1 = encoder.encode(x).to(device)
+    heatmap = []
+    with torch.no_grad():
+        for y in range(size):
+            x2 = encoder.encode(torch.tensor(y).repeat(size)).to(device)
+            z = (x + y).to(device)
+            output, loss = model(x1, x2, encoder.encode(z))
+            test_loss += loss.item()
+            line = (encoder.decode_onehot(output) == z)
+            correct += line.sum().item()
+            heatmap.append(line)
+
+    heatmap = torch.stack(heatmap)
+
+    test_loss /= size * size
+
+    print(f'\nTest all numbers {size}: Average loss: {test_loss:.4f}, Accuracy: {correct}/{size * size} ({100. * correct / (size * size):.0f}%)\n')    
+
+    plt.figure(figsize=(8, 6))
+    plt.imshow(heatmap.cpu().numpy(), origin='lower', extent=[0, size, 0, size], cmap='binary')
+    plt.xlabel('x')
+    plt.ylabel('y')
+    plt.grid(True)
+    plt.savefig(file)
+
+
 batch_size = 256
 test_batch_size = 1000
 epochs = 16
@@ -183,5 +216,11 @@ print(f"Total parameter count: {sum([p.numel() for p in model.parameters() if p.
 scheduler = StepLR(optimizer, step_size=1, gamma=gamma)
 for epoch in range(1, epochs + 1):
     train(model, device, train_loader, optimizer, epoch, test_loader, log_interval=10, test_interval=100)
-    scheduler.step()
+    plot(model, device, size=100, file="./out/add-100.png")
+    if epoch > 6:
+        scheduler.step()
+
 test(model, device, test_loader)
+plot(model, device, size=1000, file="./out/add-1000.png")
+
+print("Done")
