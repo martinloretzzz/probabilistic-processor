@@ -12,6 +12,7 @@ class NumberEmbedder(nn.Module):
         super(NumberEmbedder, self).__init__()
         self.digits, self.hidden_size = digits, hidden_size
         self.emb = nn.Embedding(digits * 10, hidden_size)
+        torch.nn.init.normal_(self.emb.weight, mean=0.0, std=0.2)
 
     def forward(self, nums):
         if any([x for x in nums if x > pow(10, self.digits)]):
@@ -38,41 +39,65 @@ class NumberEmbedder(nn.Module):
     def to_digit_tensor(self, nums):
         return [list(reversed([int(x) for x in str(num).zfill(self.digits)])) for num in nums]
 
+class ProcessorUnit(nn.Module):
+    def __init__(self, inst_width, hidden_size, internal_size, num_cores):
+        assert internal_size % num_cores == 0
+        super(ProcessorUnit, self).__init__()
+        self.size_per_head = internal_size // num_cores
 
-class ProcessorNet(nn.Module):
-    def __init__(self, program_length=0, inst_width=16, hidden_size=128):
-        super(ProcessorNet, self).__init__()
-        self.program_length = program_length
+        self.wp = nn.Linear(inst_width, internal_size)
+        self.wq = nn.Linear(hidden_size, internal_size)
+
+        self.wvd = nn.Linear(hidden_size, internal_size)
+        self.wvu = nn.Linear(internal_size, hidden_size)
+
+        n_layer = 8
+        torch.nn.init.normal_(self.wvu.weight, mean=0.0, std=0.2 * (2 * n_layer) ** -0.5)
+        torch.nn.init.zeros_(self.wvu.bias)
+        torch.nn.init.normal_(self.wvd.weight, mean=0.0, std=0.2)
+        torch.nn.init.zeros_(self.wvd.bias)
+        torch.nn.init.normal_(self.wp.weight, mean=0.0, std=0.2)
+        torch.nn.init.zeros_(self.wp.bias)
+        torch.nn.init.normal_(self.wq.weight, mean=0.0, std=0.2)
+        torch.nn.init.zeros_(self.wq.bias)
+
+    def forward(self, x, inst):
+        BS = x.shape[0]
+        xi = self.wp(inst).unsqueeze(0)
+        xq = self.wq(x)
+        t = F.cosine_similarity(xi.view(1, -1, self.size_per_head), xq.view(BS, -1, self.size_per_head), dim=-1)
+        a = F.relu(t).unsqueeze(-1)
+        xvd = self.wvd(x).view(BS, -1, self.size_per_head)
+        xva = (xvd * a).view(BS, -1)
+        out = self.wvu(xva)
+        return out
+
+
+class BinaryOperationNet(nn.Module):
+    def __init__(self, program_length, loop_count, inst_width, hidden_size, digits, internal_size, num_cores):
+        super(BinaryOperationNet, self).__init__()
+        self.embedder = NumberEmbedder(digits, hidden_size=hidden_size // 2)
+
+        self.program_length, self.loop_count = program_length, loop_count
         self.inst_width = inst_width
 
         scale = 1.0 / (0.1 + program_length * inst_width)
         self.program = nn.Parameter(torch.randn(program_length, inst_width) * scale)
 
-        self.alu_down = nn.Linear(hidden_size, inst_width)
-        self.alu_up = nn.Linear(inst_width, hidden_size)
+        self.alu = ProcessorUnit(inst_width, hidden_size, internal_size, num_cores)
 
-    def forward(self, x):
-        for i in range(self.program_length):
-            inst = self.program[i]
-            reg = self.alu_down(x)
-            reg = F.relu(reg)
-            reg = reg * inst
-            x = x + self.alu_up(reg)
+    def forward_processor(self, x):
+        for j in range(self.loop_count):
+            for i in range(self.program_length):
+                inst = self.program[i]
+                x = x + self.alu(x, inst)
         return x
-
-
-class BinaryOperationNet(nn.Module):
-    def __init__(self, program_length=16, inst_width=16, hidden_size=128, digits=4):
-        super(BinaryOperationNet, self).__init__()
-        self.processor = ProcessorNet(program_length, inst_width, hidden_size)
-
-        self.embedder = NumberEmbedder(digits, hidden_size=hidden_size // 2)
 
     def forward(self, x1, x2, targets=None):
         x1 = self.embedder(x1)
         x2 = self.embedder(x2)
         x = torch.cat((x1, x2), dim=1)
-        x = self.processor(x)
+        x = self.forward_processor(x)
         x = x[:, :self.embedder.hidden_size]
         out = self.embedder.forward_output(x)
 
@@ -123,24 +148,61 @@ def train(model, device, train_loader, optimizer, epoch, test_loader, log_interv
         if batch_idx % test_interval == 0:
             test(model, device, test_loader)
 
+def print_parameter_count(model):
+    total_params = 0
+    print("Layer-wise parameter counts:")
+    for name, param in model.named_parameters():
+        if param.requires_grad:  # Only count trainable parameters
+            param_count = param.numel()
+            print(f"{name}: {param_count}")
+            total_params += param_count
+    print(f"Total trainable parameters: {total_params}")
+    return total_params
+
 batch_size = 256
 test_batch_size = 1000
-epochs = 4
-lr = 0.5
-gamma = 0.7
+epochs = 16
+lr = 2
+gamma = 0.8
 seed = 1
 
 torch.manual_seed(seed)
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-train_loader = torch.utils.data.DataLoader(gen_dataset(dataset_size=100000, max_value=998), shuffle=True, batch_size=batch_size)
-test_loader = torch.utils.data.DataLoader(gen_dataset(dataset_size=1000, max_value=998), shuffle=False, batch_size=test_batch_size)
+train_loader = torch.utils.data.DataLoader(gen_dataset(dataset_size=25000, max_value=9998), shuffle=True, batch_size=batch_size)
+test_loader = torch.utils.data.DataLoader(gen_dataset(dataset_size=1000, max_value=9998), shuffle=False, batch_size=test_batch_size)
 
-model = BinaryOperationNet(digits=3, program_length=32, inst_width=32, hidden_size=32).to(device)
+model = BinaryOperationNet(digits=4, program_length=3, loop_count=4, inst_width=256, hidden_size=128, internal_size=512, num_cores=8).to(device)
 optimizer = optim.Adadelta(model.parameters(), lr=lr)
+
+print_parameter_count(model)
 
 scheduler = StepLR(optimizer, step_size=1, gamma=gamma)
 for epoch in range(1, epochs + 1):
     train(model, device, train_loader, optimizer, epoch, test_loader, log_interval=10, test_interval=100)
     scheduler.step()
+test(model, device, test_loader)
+
+
+"""
+class NumberEncoder():
+    def __init__(self, digits=4):
+        self.digits = digits
+
+    def encode(self, nums, device):
+        num_tensor = self.to_digit_tensor(nums, device)
+        return F.one_hot(num_tensor, num_classes=10).reshape(-1, 10 * self.digits).to(torch.float32)
+ 
+    def to_digit_tensor(self, nums, device):
+        if any([x for x in nums if x > pow(10, self.digits)]):
+            raise Exception(f"Can't embed numbers with more than {self.digits}")
+        num_list = [list(reversed([int(x) for x in str(num).zfill(self.digits)])) for num in nums]
+        return torch.tensor(num_list, dtype=torch.long, device=device)
+
+    def decode_numbers(self, x):
+        num_digits = x.reshape(-1, self.digits, 10).argmax(-1)
+        assert num_digits.shape[1] == self.digits and len(num_digits.shape) == 2, f"Last dim needs to be of size {self.digits}"
+        bases = torch.tensor([pow(10, i) for i in range(self.digits)], device=x.device).reshape(1,self.digits)
+        return (num_digits * bases).sum(-1)
+"""
