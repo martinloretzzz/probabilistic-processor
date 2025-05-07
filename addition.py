@@ -40,7 +40,8 @@ class ProcessorUnit(nn.Module):
         self.wvd = nn.Linear(config.hidden_size, internal_size)
         self.wvu = nn.Linear(internal_size, config.hidden_size)
 
-        torch.nn.init.normal_(self.wvu.weight, mean=0.0, std=0.05)
+        std = 0.05
+        torch.nn.init.normal_(self.wvu.weight, mean=0.0, std=std)
         torch.nn.init.zeros_(self.wvu.bias)
         for layer in [self.wvd, self.wp, self.wq]:
             torch.nn.init.normal_(layer.weight, mean=0.0, std=0.2)
@@ -68,8 +69,9 @@ class BinaryOperationNet(nn.Module):
         self.program_length, self.loop_count = config.program_length, config.loop_count
         self.inst_width = config.inst_width
 
-        scale = 1.0 / (0.1 + config.program_length * config.inst_width)
+        scale = 0.0026034886748242643
         self.program = nn.Parameter(torch.randn(config.program_length, config.inst_width) * scale)
+        # torch.nn.init.normal_(self.program, mean=0.0, std=0.002)
 
         self.alu = ProcessorUnit(config)
 
@@ -180,10 +182,10 @@ def plot(model, device, size, file):
 
 
 batch_size = 256
-test_batch_size = 1000
-epochs = 16
+test_batch_size = 10000
+epochs = 20
 lr = 2
-gamma = 0.8
+gamma = 0.75
 seed = 1
 
 Config = namedtuple('Config', [
@@ -192,21 +194,21 @@ Config = namedtuple('Config', [
 ])
 
 config = Config(
-    digits=4,
-    program_length=3,
-    loop_count=4,
+    digits=5,
+    program_length=1,
+    loop_count=5,
     inst_width=128,
     hidden_size=128,
     core_size=64,
-    num_cores=8
+    num_cores=32
 )
 
 torch.manual_seed(seed)
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-train_loader = torch.utils.data.DataLoader(gen_dataset(digits=config.digits, dataset_size=25000), shuffle=True, batch_size=batch_size)
-test_loader = torch.utils.data.DataLoader(gen_dataset(digits=config.digits, dataset_size=1000), shuffle=False, batch_size=test_batch_size)
+train_loader = torch.utils.data.DataLoader(gen_dataset(digits=config.digits, dataset_size=20000), shuffle=True, batch_size=batch_size)
+test_loader = torch.utils.data.DataLoader(gen_dataset(digits=config.digits, dataset_size=10000), shuffle=False, batch_size=test_batch_size)
 
 model = BinaryOperationNet(config).to(device)
 optimizer = optim.Adadelta(model.parameters(), lr=lr)
@@ -216,11 +218,11 @@ print(f"Total parameter count: {sum([p.numel() for p in model.parameters() if p.
 scheduler = StepLR(optimizer, step_size=1, gamma=gamma)
 for epoch in range(1, epochs + 1):
     train(model, device, train_loader, optimizer, epoch, test_loader, log_interval=10, test_interval=100)
-    plot(model, device, size=100, file="./out/add-100.png")
+    # plot(model, device, size=100, file="./out/add-100.png")
     if epoch > 6:
         scheduler.step()
 
 test(model, device, test_loader)
-plot(model, device, size=1000, file="./out/add-1000.png")
+# plot(model, device, size=1000, file="./out/add-1000.png")
 
 print("Done")
