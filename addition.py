@@ -1,3 +1,4 @@
+from collections import namedtuple
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -40,51 +41,49 @@ class NumberEmbedder(nn.Module):
         return [list(reversed([int(x) for x in str(num).zfill(self.digits)])) for num in nums]
 
 class ProcessorUnit(nn.Module):
-    def __init__(self, inst_width, hidden_size, internal_size, num_cores):
-        assert internal_size % num_cores == 0
+    def __init__(self, config):
         super(ProcessorUnit, self).__init__()
-        self.size_per_head = internal_size // num_cores
+        self.config = config
+        internal_size = config.core_size * config.num_cores
 
-        self.wp = nn.Linear(inst_width, internal_size)
-        self.wq = nn.Linear(hidden_size, internal_size)
+        self.wp = nn.Linear(config.inst_width, internal_size)
+        self.wq = nn.Linear(config.hidden_size, internal_size)
 
-        self.wvd = nn.Linear(hidden_size, internal_size)
-        self.wvu = nn.Linear(internal_size, hidden_size)
+        self.wvd = nn.Linear(config.hidden_size, internal_size)
+        self.wvu = nn.Linear(internal_size, config.hidden_size)
 
         n_layer = 8
         torch.nn.init.normal_(self.wvu.weight, mean=0.0, std=0.2 * (2 * n_layer) ** -0.5)
         torch.nn.init.zeros_(self.wvu.bias)
-        torch.nn.init.normal_(self.wvd.weight, mean=0.0, std=0.2)
-        torch.nn.init.zeros_(self.wvd.bias)
-        torch.nn.init.normal_(self.wp.weight, mean=0.0, std=0.2)
-        torch.nn.init.zeros_(self.wp.bias)
-        torch.nn.init.normal_(self.wq.weight, mean=0.0, std=0.2)
-        torch.nn.init.zeros_(self.wq.bias)
+        for layer in [self.wvd, self.wp, self.wq]:
+            torch.nn.init.normal_(layer.weight, mean=0.0, std=0.2)
+            torch.nn.init.zeros_(layer.bias)
 
     def forward(self, x, inst):
         BS = x.shape[0]
         xi = self.wp(inst).unsqueeze(0)
         xq = self.wq(x)
-        t = F.cosine_similarity(xi.view(1, -1, self.size_per_head), xq.view(BS, -1, self.size_per_head), dim=-1)
+        t = F.cosine_similarity(xi.view(1, -1, self.config.core_size), xq.view(BS, -1, self.config.core_size), dim=-1)
         a = F.relu(t).unsqueeze(-1)
-        xvd = self.wvd(x).view(BS, -1, self.size_per_head)
+        xvd = self.wvd(x).view(BS, -1, self.config.core_size)
         xva = (xvd * a).view(BS, -1)
         out = self.wvu(xva)
         return out
 
 
 class BinaryOperationNet(nn.Module):
-    def __init__(self, program_length, loop_count, inst_width, hidden_size, digits, internal_size, num_cores):
+    def __init__(self, config):
         super(BinaryOperationNet, self).__init__()
-        self.embedder = NumberEmbedder(digits, hidden_size=hidden_size // 2)
+        self.config = config
+        self.embedder = NumberEmbedder(config.digits, hidden_size=config.hidden_size // 2)
 
-        self.program_length, self.loop_count = program_length, loop_count
-        self.inst_width = inst_width
+        self.program_length, self.loop_count = config.program_length, config.loop_count
+        self.inst_width = config.inst_width
 
-        scale = 1.0 / (0.1 + program_length * inst_width)
-        self.program = nn.Parameter(torch.randn(program_length, inst_width) * scale)
+        scale = 1.0 / (0.1 + config.program_length * config.inst_width)
+        self.program = nn.Parameter(torch.randn(config.program_length, config.inst_width) * scale)
 
-        self.alu = ProcessorUnit(inst_width, hidden_size, internal_size, num_cores)
+        self.alu = ProcessorUnit(config)
 
     def forward_processor(self, x):
         for j in range(self.loop_count):
@@ -166,6 +165,21 @@ lr = 2
 gamma = 0.8
 seed = 1
 
+Config = namedtuple('Config', [
+    'digits', 'program_length', 'loop_count', 'inst_width',
+    'hidden_size', 'core_size', 'num_cores'
+])
+
+config = Config(
+    digits=4,
+    program_length=3,
+    loop_count=4,
+    inst_width=128,
+    hidden_size=128,
+    core_size=64,
+    num_cores=8
+)
+
 torch.manual_seed(seed)
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -173,7 +187,7 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 train_loader = torch.utils.data.DataLoader(gen_dataset(dataset_size=25000, max_value=9998), shuffle=True, batch_size=batch_size)
 test_loader = torch.utils.data.DataLoader(gen_dataset(dataset_size=1000, max_value=9998), shuffle=False, batch_size=test_batch_size)
 
-model = BinaryOperationNet(digits=4, program_length=3, loop_count=4, inst_width=256, hidden_size=128, internal_size=512, num_cores=8).to(device)
+model = BinaryOperationNet(config).to(device)
 optimizer = optim.Adadelta(model.parameters(), lr=lr)
 
 print_parameter_count(model)
