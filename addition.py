@@ -69,9 +69,8 @@ class BinaryOperationNet(nn.Module):
         torch.nn.init.normal_(self.emb.weight, mean=0.0, std=0.2)
 
         self.program_length, self.loop_count = config.program_length, config.loop_count
-        self.inst_width = config.inst_width
 
-        scale = 0.0026034886748242643
+        scale = 0.02
         self.program = nn.Parameter(torch.randn(config.program_length, config.inst_width) * scale)
         # torch.nn.init.normal_(self.program, mean=0.0, std=0.002)
         self.loop_counter = nn.Parameter(torch.empty(self.loop_count, config.hidden_size))
@@ -102,7 +101,7 @@ class BinaryOperationNet(nn.Module):
                 inst_i = self.instruction_counter[i]
                 inst = self.program[i]
                 inst_pos = (loop_i + inst_i).unsqueeze(0)
-                x = x + self.alu(self.ln(x + inst_pos), inst)
+                x = x + self.alu(self.ln(x) + inst_pos, inst)
         return x
 
     def embed(self, x):
@@ -215,7 +214,7 @@ epochs = 32
 seed = 1
 
 max_lr = 3
-min_lr = max_lr * 0.1
+min_lr = 0.2
 max_steps = epochs * (train_dataset_size // batch_size)
 warmup_steps = 2 * (train_dataset_size // batch_size)
 
@@ -241,7 +240,7 @@ train_loader = torch.utils.data.DataLoader(gen_dataset(digits=config.digits, dat
 test_loader = torch.utils.data.DataLoader(gen_dataset(digits=config.digits, dataset_size=test_dataset_size), shuffle=False, batch_size=test_batch_size)
 
 model = BinaryOperationNet(config).to(device)
-optimizer = optim.Adadelta(model.parameters(), lr=max_lr)
+optimizer = optim.Adadelta(model.parameters(), lr=max_lr, weight_decay=8e-6)
 
 total_params = sum([p.numel() for p in model.parameters() if p.requires_grad])
 print(f"Total parameter count: {total_params}")
@@ -273,7 +272,7 @@ for epoch in range(1, epochs + 1):
     # plot(model, device, size=100, file="./out/add-100.png")
 
 test(model, device, test_loader, epoch=epochs)
-plot(model, device, size=1000, file="./out/add-1000.png")
+plot(model, device, size=500, file="./out/add-1000.png")
 
 wandb.finish()
 print("Done")
