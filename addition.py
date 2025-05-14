@@ -159,9 +159,11 @@ def train(model, device, train_loader, optimizer, scheduler, epoch, test_loader,
         scheduler.step()
         lr = optimizer.param_groups[0]['lr']
 
+        norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+
         if batch_idx % log_interval == 0:
             print(f'Train Epoch: {epoch} [{batch_idx * len(data)}/{len(train_loader.dataset)} ({100. * batch_idx / len(train_loader):.0f}%)]\tLoss: {loss.item():.6f}')
-            wandb.log({"epoch": epoch, "batch_idx": batch_idx, "train_loss": loss.item(), "lr": lr})
+            wandb.log({"epoch": epoch, "batch_idx": batch_idx, "train_loss": loss.item(), "lr": lr, "norm": norm})
 
         if batch_idx % test_interval == 0:
             test(model, device, test_loader, epoch)
