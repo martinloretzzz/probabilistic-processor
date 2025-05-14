@@ -73,6 +73,10 @@ class BinaryOperationNet(nn.Module):
         scale = 0.0026034886748242643
         self.program = nn.Parameter(torch.randn(config.program_length, config.inst_width) * scale)
         # torch.nn.init.normal_(self.program, mean=0.0, std=0.002)
+        self.loop_counter = nn.Parameter(torch.empty(self.loop_count, config.hidden_size))
+        self.instruction_counter = nn.Parameter(torch.empty(self.program_length, config.hidden_size))
+        torch.nn.init.normal_(self.loop_counter, mean=0.0, std=0.2)
+        torch.nn.init.normal_(self.instruction_counter, mean=0.0, std=0.2)
 
         self.alu = ProcessorUnit(config)
 
@@ -91,9 +95,12 @@ class BinaryOperationNet(nn.Module):
     
     def forward_processor(self, x):
         for j in range(self.loop_count):
+            loop_i = self.loop_counter[j]
             for i in range(self.program_length):
+                inst_i = self.instruction_counter[i]
                 inst = self.program[i]
-                x = x + self.alu(x, inst)
+                inst_pos = loop_i + inst_i
+                x = x + self.alu(x + inst_pos, inst)
         return x
 
     def embed(self, x):
@@ -229,7 +236,7 @@ print(f"Total parameter count: {total_params}")
 
 wandb.init(
     project="probabilistic-processor",
-    name="b-0",
+    name=f"b-d{config.digits}-l{config.program_length}",
     config={
         "batch_size": batch_size,
         "test_batch_size": test_batch_size,
