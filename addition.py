@@ -79,6 +79,7 @@ class BinaryOperationNet(nn.Module):
         torch.nn.init.normal_(self.instruction_counter, mean=0.0, std=0.2)
 
         self.alu = ProcessorUnit(config)
+        self.ln = nn.LayerNorm(config.hidden_size)
 
     def forward(self, x1, x2, targets=None):
         x1 = self.embed(x1)
@@ -99,8 +100,8 @@ class BinaryOperationNet(nn.Module):
             for i in range(self.program_length):
                 inst_i = self.instruction_counter[i]
                 inst = self.program[i]
-                inst_pos = loop_i + inst_i
-                x = x + self.alu(x + inst_pos, inst)
+                inst_pos = (loop_i + inst_i).unsqueeze(0)
+                x = x + self.alu(self.ln(x + inst_pos), inst)
         return x
 
     def embed(self, x):
