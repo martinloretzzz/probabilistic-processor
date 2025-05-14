@@ -213,8 +213,8 @@ test_batch_size = 10000
 epochs = 32
 seed = 1
 
-max_lr = 3
-min_lr = 0.2
+max_lr = 1e-2
+min_lr = 0.1 * max_lr
 max_steps = epochs * (train_dataset_size // batch_size)
 warmup_steps = 2 * (train_dataset_size // batch_size)
 
@@ -225,7 +225,7 @@ Config = namedtuple('Config', [
 
 config = Config(
     digits=6,
-    program_length=2,
+    program_length=3,
     loop_count=6,
     inst_width=128,
     hidden_size=128,
@@ -240,7 +240,7 @@ train_loader = torch.utils.data.DataLoader(gen_dataset(digits=config.digits, dat
 test_loader = torch.utils.data.DataLoader(gen_dataset(digits=config.digits, dataset_size=test_dataset_size), shuffle=False, batch_size=test_batch_size)
 
 model = BinaryOperationNet(config).to(device)
-optimizer = optim.Adadelta(model.parameters(), lr=max_lr, weight_decay=8e-6)
+optimizer = optim.AdamW(model.parameters(), lr=max_lr, weight_decay=1e-5)
 
 total_params = sum([p.numel() for p in model.parameters() if p.requires_grad])
 print(f"Total parameter count: {total_params}")
