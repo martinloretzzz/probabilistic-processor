@@ -2,3 +2,5 @@ data-mnist/
 out/
 .venv
 .vscode
+wandb
+*.log

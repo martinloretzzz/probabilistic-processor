@@ -8,6 +8,7 @@ from torch.optim.lr_scheduler import StepLR
 import torch.nn.functional as F
 from torch.utils.data import TensorDataset, Dataset
 import matplotlib.pyplot as plt
+import wandb
 
 class NumberEncoder():
     def __init__(self, digits):
@@ -114,7 +115,7 @@ def gen_dataset(digits, dataset_size, max_value=None):
 
     return TensorDataset(x, y)
 
-def test(model, device, test_loader):
+def test(model, device, test_loader, epoch):
     model.eval()
     test_loss = 0
     correct = 0
@@ -129,9 +130,12 @@ def test(model, device, test_loader):
             correct += (encoder.decode_onehot(output) == encoder.decode(target)).sum(-1).item()
 
     test_loss /= len(test_loader.dataset)
+    test_accuracy = 100. * correct / len(test_loader.dataset)
 
-    print(f'\nTest set: Average loss: {test_loss:.4f}, Accuracy: {correct}/{len(test_loader.dataset)} ({100. * correct / len(test_loader.dataset):.0f}%)\n')    
+    wandb.log({"epoch": epoch, "test_loss": test_loss, "test_accuracy": test_accuracy})
 
+    print(f'\nTest set: Average loss: {test_loss:.4f}, Accuracy: {correct}/{len(test_loader.dataset)} ({test_accuracy:.0f}%)\n')
+    return test_loss, test_accuracy
 
 def train(model, device, train_loader, optimizer, epoch, test_loader, log_interval=10, test_interval=100):
     model.train()
@@ -145,12 +149,14 @@ def train(model, device, train_loader, optimizer, epoch, test_loader, log_interv
         optimizer.step()
         if batch_idx % log_interval == 0:
             print(f'Train Epoch: {epoch} [{batch_idx * len(data)}/{len(train_loader.dataset)} ({100. * batch_idx / len(train_loader):.0f}%)]\tLoss: {loss.item():.6f}')
+            wandb.log({"epoch": epoch, "batch_idx": batch_idx, "train_loss": loss.item()})
 
         if batch_idx % test_interval == 0:
-            test(model, device, test_loader)
+            test(model, device, test_loader, epoch)
 
 def plot(model, device, size, file):
-    if not os.path.exists(os.path.dirname(file)): os.mkdir(os.path.dirname(file))
+    if not os.path.exists(os.path.dirname(file)):
+        os.makedirs(os.path.dirname(file))
     model.eval()
     test_loss, correct = 0, 0
     encoder = NumberEncoder(model.config.digits)
@@ -168,10 +174,9 @@ def plot(model, device, size, file):
             heatmap.append(line)
 
     heatmap = torch.stack(heatmap)
-
     test_loss /= size * size
-
-    print(f'\nTest all numbers {size}: Average loss: {test_loss:.4f}, Accuracy: {correct}/{size * size} ({100. * correct / (size * size):.0f}%)\n')    
+    accuracy = 100. * correct / (size * size)
+    print(f'\nTest all numbers {size}: Average loss: {test_loss:.4f}, Accuracy: {correct}/{size * size} ({accuracy:.0f}%)\n')
 
     plt.figure(figsize=(8, 6))
     plt.imshow(heatmap.cpu().numpy(), origin='lower', extent=[0, size, 0, size], cmap='binary')
@@ -180,6 +185,13 @@ def plot(model, device, size, file):
     plt.grid(True)
     plt.savefig(file)
 
+    wandb.log({
+        "plot_test_loss": test_loss,
+        "plot_accuracy": accuracy,
+        "heatmap_size": size,
+        "heatmap": wandb.Image(file)
+    })
+    plt.close()
 
 batch_size = 256
 test_batch_size = 10000
@@ -195,7 +207,7 @@ Config = namedtuple('Config', [
 
 config = Config(
     digits=5,
-    program_length=1,
+    program_length=2,
     loop_count=5,
     inst_width=128,
     hidden_size=128,
@@ -204,7 +216,6 @@ config = Config(
 )
 
 torch.manual_seed(seed)
-
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 train_loader = torch.utils.data.DataLoader(gen_dataset(digits=config.digits, dataset_size=20000), shuffle=True, batch_size=batch_size)
@@ -213,7 +224,23 @@ test_loader = torch.utils.data.DataLoader(gen_dataset(digits=config.digits, data
 model = BinaryOperationNet(config).to(device)
 optimizer = optim.Adadelta(model.parameters(), lr=lr)
 
-print(f"Total parameter count: {sum([p.numel() for p in model.parameters() if p.requires_grad])}")
+total_params = sum([p.numel() for p in model.parameters() if p.requires_grad])
+print(f"Total parameter count: {total_params}")
+
+wandb.init(
+    project="probabilistic-processor",
+    name="b-0",
+    config={
+        "batch_size": batch_size,
+        "test_batch_size": test_batch_size,
+        "epochs": epochs,
+        "lr": lr,
+        "gamma": gamma,
+        "seed": seed,
+        "total_parameters": total_params,
+        **config._asdict()
+    }
+)
 
 scheduler = StepLR(optimizer, step_size=1, gamma=gamma)
 for epoch in range(1, epochs + 1):
@@ -222,7 +249,8 @@ for epoch in range(1, epochs + 1):
     if epoch > 6:
         scheduler.step()
 
-test(model, device, test_loader)
-# plot(model, device, size=1000, file="./out/add-1000.png")
+test(model, device, test_loader, epoch=epochs)
+plot(model, device, size=1000, file="./out/add-1000.png")
 
+wandb.finish()
 print("Done")
