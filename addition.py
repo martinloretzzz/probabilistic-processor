@@ -5,6 +5,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
 from torch.optim.lr_scheduler import StepLR
+from torch.optim.lr_scheduler import LinearLR, CosineAnnealingLR, SequentialLR
 import torch.nn.functional as F
 from torch.utils.data import TensorDataset, Dataset
 import matplotlib.pyplot as plt
@@ -145,7 +146,7 @@ def test(model, device, test_loader, epoch):
     print(f'\nTest set: Average loss: {test_loss:.4f}, Accuracy: {correct}/{len(test_loader.dataset)} ({test_accuracy:.0f}%)\n')
     return test_loss, test_accuracy
 
-def train(model, device, train_loader, optimizer, epoch, test_loader, log_interval=10, test_interval=100):
+def train(model, device, train_loader, optimizer, scheduler, epoch, test_loader, log_interval=10, test_interval=100):
     model.train()
     for batch_idx, (data, target) in enumerate(train_loader):
         x1, x2 = torch.split(data, split_size_or_sections=1, dim=-1)
@@ -155,9 +156,12 @@ def train(model, device, train_loader, optimizer, epoch, test_loader, log_interv
         output, loss = model(x1, x2, targets=target)
         loss.backward()
         optimizer.step()
+        scheduler.step()
+        lr = optimizer.param_groups[0]['lr']
+
         if batch_idx % log_interval == 0:
             print(f'Train Epoch: {epoch} [{batch_idx * len(data)}/{len(train_loader.dataset)} ({100. * batch_idx / len(train_loader):.0f}%)]\tLoss: {loss.item():.6f}')
-            wandb.log({"epoch": epoch, "batch_idx": batch_idx, "train_loss": loss.item()})
+            wandb.log({"epoch": epoch, "batch_idx": batch_idx, "train_loss": loss.item(), "lr": lr})
 
         if batch_idx % test_interval == 0:
             test(model, device, test_loader, epoch)
@@ -201,12 +205,17 @@ def plot(model, device, size, file):
     })
     plt.close()
 
+train_dataset_size = 20000
+test_dataset_size = 10000
 batch_size = 256
 test_batch_size = 10000
-epochs = 20
-lr = 2
-gamma = 0.75
+epochs = 32
 seed = 1
+
+max_lr = 3
+min_lr = max_lr * 0.1
+max_steps = epochs * (train_dataset_size // batch_size)
+warmup_steps = 2 * (train_dataset_size // batch_size)
 
 Config = namedtuple('Config', [
     'digits', 'program_length', 'loop_count', 'inst_width',
@@ -214,9 +223,9 @@ Config = namedtuple('Config', [
 ])
 
 config = Config(
-    digits=5,
+    digits=6,
     program_length=2,
-    loop_count=5,
+    loop_count=6,
     inst_width=128,
     hidden_size=128,
     core_size=64,
@@ -226,11 +235,11 @@ config = Config(
 torch.manual_seed(seed)
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-train_loader = torch.utils.data.DataLoader(gen_dataset(digits=config.digits, dataset_size=20000), shuffle=True, batch_size=batch_size)
-test_loader = torch.utils.data.DataLoader(gen_dataset(digits=config.digits, dataset_size=10000), shuffle=False, batch_size=test_batch_size)
+train_loader = torch.utils.data.DataLoader(gen_dataset(digits=config.digits, dataset_size=train_dataset_size), shuffle=True, batch_size=batch_size)
+test_loader = torch.utils.data.DataLoader(gen_dataset(digits=config.digits, dataset_size=test_dataset_size), shuffle=False, batch_size=test_batch_size)
 
 model = BinaryOperationNet(config).to(device)
-optimizer = optim.Adadelta(model.parameters(), lr=lr)
+optimizer = optim.Adadelta(model.parameters(), lr=max_lr)
 
 total_params = sum([p.numel() for p in model.parameters() if p.requires_grad])
 print(f"Total parameter count: {total_params}")
@@ -242,20 +251,24 @@ wandb.init(
         "batch_size": batch_size,
         "test_batch_size": test_batch_size,
         "epochs": epochs,
-        "lr": lr,
-        "gamma": gamma,
+        "max_lr": max_lr,
+        "min_lr": min_lr,
         "seed": seed,
         "total_parameters": total_params,
+        "train_dataset_size": train_dataset_size,
+        "test_dataset_size": test_dataset_size,
         **config._asdict()
     }
 )
 
-scheduler = StepLR(optimizer, step_size=1, gamma=gamma)
+cosine_steps = max_steps - warmup_steps
+warmup_scheduler = LinearLR(optimizer, start_factor=1e-10, end_factor=1.0, total_iters=warmup_steps)
+cosine_scheduler = CosineAnnealingLR(optimizer, T_max=cosine_steps, eta_min=min_lr)
+scheduler = SequentialLR(optimizer, schedulers=[warmup_scheduler, cosine_scheduler], milestones=[warmup_steps])
+
 for epoch in range(1, epochs + 1):
-    train(model, device, train_loader, optimizer, epoch, test_loader, log_interval=10, test_interval=100)
+    train(model, device, train_loader, optimizer, scheduler, epoch, test_loader, log_interval=10, test_interval=100)
     # plot(model, device, size=100, file="./out/add-100.png")
-    if epoch > 6:
-        scheduler.step()
 
 test(model, device, test_loader, epoch=epochs)
 plot(model, device, size=1000, file="./out/add-1000.png")
